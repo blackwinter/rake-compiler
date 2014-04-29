@@ -17,210 +17,197 @@
 # for cross-compilation.
 #
 
+abort <<-EOT if RUBY_PLATFORM =~ /mingw|mswin/
+This tool is meant to be executed under Linux or OSX, not Windows.
+It is used for cross-compilation only.
+EOT
+
 require 'rake'
 require 'rake/clean'
 
-begin
-  require 'psych'
-rescue LoadError
-end
+require 'rbconfig'
+require 'safe_yaml/load'
 
-require 'yaml'
-require "rbconfig"
+ruby_src = ENV['SRC']
+ruby_svn = ENV['SVN']
 
-# load compiler helpers
-# add lib directory to the search path
-libdir = File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'lib'))
-$LOAD_PATH.unshift(libdir) unless $LOAD_PATH.include?(libdir)
+make_command = ENV.fetch('MAKE') {
+  require 'nuggets/file/which'
+  File.which_command(%w[gmake make])
+}
 
-if RUBY_PLATFORM =~ /mingw|mswin/ then
-  puts "This command is meant to be executed under Linux or OSX, not Windows (is for cross-compilation)"
-  exit(1)
-end
+mingw_host = ENV.fetch('HOST') {
+  require 'rake/extensioncompiler'
+  Rake::ExtensionCompiler.mingw_host
+}
 
-require 'rake/extensioncompiler'
+version_name = 'ruby-%s' % ENV.fetch('VERSION') {
+  '%s-p%s' % [RUBY_VERSION, RUBY_PATCHLEVEL]
+}
 
-MAKE = ENV['MAKE'] || %w[gmake make].find { |c| system("#{c} -v > /dev/null 2>&1") }
-USER_HOME = File.expand_path("~/.rake-compiler")
-RUBY_CC_VERSION = "ruby-" << ENV.fetch("VERSION", "1.8.7-p371")
-RUBY_SOURCE = ENV['SOURCE']
-RUBY_SVN = ENV['SVN']
-RUBY_BUILD = RbConfig::CONFIG["host"]
+# Grab the major "1.8" or "1.9" part of the version number
+version_major = version_name[/.*-(\d\.\d)\.\d/, 1]
 
-# grab the major "1.8" or "1.9" part of the version number
-MAJOR = RUBY_CC_VERSION.match(/.*-(\d.\d).\d/)[1]
+download_url = "http://cache.ruby-lang.org/pub/ruby/#{version_major}"
+svn_repo_url = 'http://svn.ruby-lang.org/repos/ruby'
 
-# Use Rake::ExtensionCompiler helpers to find the proper host
-MINGW_HOST = ENV['HOST'] || Rake::ExtensionCompiler.mingw_host
-MINGW_TARGET = MINGW_HOST.gsub('msvc', '')
+base_directory       = File.expand_path('~/.rake-compiler')
+config_file          = File.join(base_directory, 'config.yml')
+
+sources_directory    = File.join(base_directory, 'sources')
+builds_directory     = File.join(base_directory, 'builds')
+targets_directory    = File.join(base_directory, 'ruby')
+
+source_directory     = File.join(sources_directory, version_name)
+build_directory      = File.join(builds_directory,  mingw_host, version_name)
+target_directory     = File.join(targets_directory, mingw_host, version_name)
+
+tarball_file         = !ruby_src ? source_directory + '.tar.bz2' :
+                       File.join(sources_directory, File.basename(ruby_src))
+
+makefile_file        = File.join(build_directory, 'Makefile')
+makefile_in_file     = File.join(source_directory, 'Makefile.in')
+makefile_in_bak_file = makefile_in_file + '.bak'
+
+build_ruby_exe_file  = File.join(build_directory, 'ruby.exe')
+target_ruby_exe_file = File.join(target_directory, 'bin', 'ruby.exe')
 
 # Unset any possible variable that might affect compilation
-["CC", "CXX", "CPPFLAGS", "LDFLAGS", "RUBYOPT"].each do |var|
-  ENV.delete(var)
-end
+%w[CC CXX CPPFLAGS LDFLAGS RUBYOPT].each { |k| ENV.delete(k) }
 
-# define a location where sources will be stored
-directory "#{USER_HOME}/sources/#{RUBY_CC_VERSION}"
-directory "#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}"
+# Define a location where sources will be stored
+directory source_directory
+directory build_directory
 
-# clean intermediate files and folders
-CLEAN.include("#{USER_HOME}/sources/#{RUBY_CC_VERSION}")
-CLEAN.include("#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}")
+# Clean intermediate files and folders
+CLEAN.include(source_directory)
+CLEAN.include(build_directory)
 
-# remove the final products and sources
-CLOBBER.include("#{USER_HOME}/sources")
-CLOBBER.include("#{USER_HOME}/builds")
-CLOBBER.include("#{USER_HOME}/ruby/#{MINGW_HOST}/#{RUBY_CC_VERSION}")
-CLOBBER.include("#{USER_HOME}/config.yml")
+# Remove the final products and sources
+CLOBBER.include(sources_directory)
+CLOBBER.include(builds_directory)
+CLOBBER.include(target_directory)
+CLOBBER.include(config_file)
 
-# ruby source file should be stored there
-file "#{USER_HOME}/sources/#{RUBY_CC_VERSION}.tar.bz2" => ["#{USER_HOME}/sources"] do |t|
-  # download the source file using wget or curl
-  chdir File.dirname(t.name) do
-    if RUBY_SOURCE
-      url = RUBY_SOURCE
-    else
-      url = "http://cache.ruby-lang.org/pub/ruby/#{MAJOR}/#{File.basename(t.name)}"
-    end
-    sh "wget #{url} || curl -O #{url}"
-  end
+# Ruby source file should be stored here
+file tarball_file => sources_directory do |t|
+  url = ruby_src || File.join(download_url, File.basename(t.name))
+  chdir(sources_directory) { sh "wget #{url} || curl -O #{url}" }
 end
 
 # Extract the sources
-if RUBY_SVN
-
-  file "#{USER_HOME}/sources/#{RUBY_CC_VERSION}" do |t|
-    sh "svn export -q http://svn.ruby-lang.org/repos/ruby/#{RUBY_SVN} #{t.name}"
-    chdir(t.name) { sh 'autoreconf' }
+if ruby_svn
+  file source_directory => sources_directory do |t|
+    sh "svn export -q #{File.join(svn_repo_url, ruby_svn)} #{t.name}"
+    chdir(source_directory) { sh 'autoreconf' }
   end
-
 else
-
-  source_file = RUBY_SOURCE ? RUBY_SOURCE.split('/').last : "#{RUBY_CC_VERSION}.tar.bz2"
-  file "#{USER_HOME}/sources/#{RUBY_CC_VERSION}" => ["#{USER_HOME}/sources/#{source_file}"] do |t|
-    chdir File.dirname(t.name) do
-      t.prerequisites.each { |f| sh "tar xf #{File.basename(f)}" }
-    end
+  file source_directory => tarball_file do |t|
+    chdir(sources_directory) { sh "tar xf #{tarball_file}" }
   end
-
 end
 
-# backup makefile.in
-file "#{USER_HOME}/sources/#{RUBY_CC_VERSION}/Makefile.in.bak" => ["#{USER_HOME}/sources/#{RUBY_CC_VERSION}"] do |t|
-  cp "#{USER_HOME}/sources/#{RUBY_CC_VERSION}/Makefile.in", t.name
+# Backup makefile.in
+file makefile_in_bak_file => source_directory do |t|
+  cp makefile_in_file, t.name
 end
 
-# correct the makefiles
-file "#{USER_HOME}/sources/#{RUBY_CC_VERSION}/Makefile.in" => ["#{USER_HOME}/sources/#{RUBY_CC_VERSION}/Makefile.in.bak"] do |t|
-  content = File.open(t.name, 'rb') { |f| f.read }
+# Correct the makefile
+file makefile_in_file => makefile_in_bak_file do |t|
+  out = ''
 
-  out = ""
-
-  content.each_line do |line|
-    if line =~ /^\s*ALT_SEPARATOR =/
-      out << "\t\t    ALT_SEPARATOR = \"\\\\\\\\\"; \\\n"
-    else
-      out << line
-    end
-  end
-
-  when_writing("Patching Makefile.in") {
-    File.open(t.name, 'wb') { |f| f.write(out) }
+  File.foreach(t.name) { |line|
+    line.sub!(/\A(\s*ALT_SEPARATOR =).*/, "\\1 \"\\\\\\\\\"; \\\n")
+    out << line
   }
+
+  when_writing('Patching Makefile.in') { File.write(t.name, out) }
 end
 
-task :mingw32 do
-  unless MINGW_HOST then
-    warn "You need to install mingw32 cross compile functionality to be able to continue."
-    warn "Please refer to your distribution/package manager documentation about installation."
-    fail
-  end
-end
-
-# generate the makefile in a clean build location
-file "#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}/Makefile" => ["#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}",
-                                  "#{USER_HOME}/sources/#{RUBY_CC_VERSION}/Makefile.in"] do |t|
-
-  options = [
-    "--host=#{MINGW_HOST}",
-    "--target=#{MINGW_TARGET}",
-    "--build=#{RUBY_BUILD}",
-    '--enable-shared',
-    '--disable-install-doc',
-    '--without-tk',
-    '--without-tcl'
+# Generate the makefile in a clean build location
+file makefile_file => [build_directory, makefile_in_file] do |t|
+  options = %W[
+    --host=#{mingw_host}
+    --target=#{mingw_host.gsub('msvc', '')}
+    --build=#{RbConfig::CONFIG['host']}
+    --prefix=#{target_directory}
+    --enable-shared
+    --disable-install-doc
+    --without-tk
+    --without-tcl
   ]
 
   # Force Winsock2 for Ruby 1.8, 1.9 defaults to it
-  options << "--with-winsock2" if MAJOR == "1.8"
+  options << '--with-winsock2' if version_major == '1.8'
 
-  chdir File.dirname(t.name) do
-    prefix = File.expand_path("../../../ruby/#{MINGW_HOST}/#{RUBY_CC_VERSION}")
-    options << "--prefix=#{prefix}"
-    sh File.expand_path("../../../sources/#{RUBY_CC_VERSION}/configure"), *options
-  end
+  chdir(build_directory) {
+    sh File.join(source_directory, 'configure'), *options
+  }
 end
 
-# make
-file "#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}/ruby.exe" => ["#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}/Makefile"] do |t|
-  chdir File.dirname(t.prerequisites.first) do
-    sh MAKE
-  end
+# Make
+file build_ruby_exe_file => makefile_file do |t|
+  chdir(build_directory) { sh make_command }
 end
 
-# make install
-file "#{USER_HOME}/ruby/#{MINGW_HOST}/#{RUBY_CC_VERSION}/bin/ruby.exe" => ["#{USER_HOME}/builds/#{MINGW_HOST}/#{RUBY_CC_VERSION}/ruby.exe"] do |t|
-  chdir File.dirname(t.prerequisites.first) do
-    sh "#{MAKE} install"
-  end
+# Make install
+file target_ruby_exe_file => build_ruby_exe_file do |t|
+  chdir(build_directory) { sh "#{make_command} install" }
 end
-task :install => ["#{USER_HOME}/ruby/#{MINGW_HOST}/#{RUBY_CC_VERSION}/bin/ruby.exe"]
 
-desc "Update rake-compiler list of installed Ruby versions"
+task :install => target_ruby_exe_file
+
+task :mingw32 do
+  abort <<-EOT unless mingw_host
+You need to install mingw32 cross compile functionality to be able to continue.
+Please refer to your distribution/package manager documentation about installation.
+  EOT
+end
+
+desc 'Update rake-compiler list of installed Ruby versions'
 task 'update-config' do
-  config_file = "#{USER_HOME}/config.yml"
-  if File.exist?(config_file) then
+  config = if File.exist?(config_file)
     puts "Updating #{config_file}"
-    config = YAML.load_file(config_file)
+    SafeYAML.load_file(config_file)
   else
     puts "Generating #{config_file}"
-    config = {}
+    {}
   end
 
-  files = Dir.glob("#{USER_HOME}/ruby/*/*/**/rbconfig.rb").sort
-
-  files.each do |rbconfig|
-    version, platform = rbconfig.match(/.*-(\d.\d.\d).*\/([-\w]+)\/rbconfig/)[1,2]
-    platforms = [platform]
-
-    # fake alternate (binary compatible) i386-mswin32-60 platform
-    platform == "i386-mingw32" and
-      platforms.push "i386-mswin32-60"
-
-    platforms.each do |plat|
-      config["rbconfig-#{plat}-#{version}"] = rbconfig
-
-      # also store RubyGems-compatible version
-      gem_platform = Gem::Platform.new(plat)
-      config["rbconfig-#{gem_platform}-#{version}"] = rbconfig
+  Dir["#{targets_directory}/*/*/**/rbconfig.rb"].sort.each { |rbconfig|
+    if rbconfig =~ %r{.*-(\d.\d.\d).*/([-\w]+)/rbconfig}
+      version, platform = $1, $2
+    else
+      warn "Invalid pattern: #{rbconfig}"
+      next
     end
+
+    platforms, key = [platform], "rbconfig-%s-#{version}"
+
+    # Fake alternate (binary compatible) i386-mswin32-60 platform
+    platforms << 'i386-mswin32-60' if platform == 'i386-mingw32'
+
+    platforms.each { |pf|
+      config[key % pf] = rbconfig
+
+      # Also store RubyGems-compatible version
+      config[key % Gem::Platform.new(pf)] = rbconfig
+    }
 
     puts "Found Ruby version #{version} for platform #{platform} (#{rbconfig})"
-  end
+  }
 
   when_writing("Saving changes into #{config_file}") {
-    File.open(config_file, 'w') do |f|
-      f.puts config.to_yaml
-    end
+    File.open(config_file, 'w') { |f| YAML.dump(config, f) }
   }
 end
 
 task :default do
   # Force the display of the available tasks when no option is given
   Rake.application.options.show_task_pattern = //
+  Rake.application.options.show_tasks = :tasks
   Rake.application.display_tasks_and_comments
 end
 
-desc "Build #{RUBY_CC_VERSION} suitable for cross-platform development."
+desc "Build #{version_name} suitable for cross-platform development."
 task 'cross-ruby' => [:mingw32, :install, 'update-config']
-
