@@ -2,7 +2,7 @@ require 'rubygems/package_task'
 
 GEM_SPEC = Gem::Specification.new do |s|
   # basic information
-  s.name        = "rake-compiler"
+  s.name        = "blackwinter-rake-compiler"
   s.version     = "0.9.2"
   s.platform    = Gem::Platform::RUBY
 
@@ -38,13 +38,12 @@ GEM_SPEC = Gem::Specification.new do |s|
   s.extra_rdoc_files = %w(README.rdoc LICENSE.txt History.txt)
 
   # project information
-  s.homepage          = 'http://github.com/luislavena/rake-compiler'
-  s.rubyforge_project = 'rake-compiler'
+  s.homepage          = 'http://github.com/blackwinter/rake-compiler'
   s.licenses          = ['MIT']
 
   # author and contributors
-  s.author      = 'Luis Lavena'
-  s.email       = 'luislavena@gmail.com'
+  s.authors     = ['Luis Lavena', 'Jens Wille']
+  s.email       = 'jens.wille@gmail.com'
 end
 
 gem_package = Gem::PackageTask.new(GEM_SPEC) do |pkg|
